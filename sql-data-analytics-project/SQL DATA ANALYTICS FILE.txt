@@ -1,0 +1,217 @@
+create database Datawarehouse;
+use datawarehouse;
+select  * from dim_customers;
+select * from dim_products;
+select * from fact_sales;
+
+-- CHANGE OVER TIME ANALYSIS
+
+select year(order_date) as order_year , sum(sales_amount) as total_sales,
+month(order_date) as order_month ,  count(distinct customer_key) as total_customer,
+sum(quantity) as total_quantity from fact_sales
+where year(order_date) is not null
+group by year(order_date) ,  month(order_date)
+order by year(order_date) ,  month(order_date);
+
+
+-- CUMULATIVE ANALYISIS
+
+select order_month  , total_sales  , avg_sales , 
+sum(total_sales) over(order by order_month) as running_total_sales,
+cast(avg(avg_sales) over(order by order_month) as signed) as running_avg_sales 
+from 
+(
+SELECT DATE_FORMAT(order_date, '%Y-%m-01')  as order_month , sum(sales_amount) as total_sales ,
+avg(sales_amount) as avg_sales FROM fact_sales
+where DATE_FORMAT(order_date, '%Y-%m-01') is not null
+group by DATE_FORMAT(order_date, '%Y-%m-01')
+order by DATE_FORMAT(order_date, '%Y-%m-01')
+) as h;
+
+-- PERFORMANCE ANALYSIS
+
+-- Analyze the performance of the products by 
+-- comparing their sales to both average sales performance of the prdouct and the previous years sales
+
+
+with vijay as (
+select year(f.order_date) as order_year  , p.product_name, sum(f.sales_amount) as current_sales from fact_sales f
+left join dim_products p
+on p.product_key = f.product_key
+where year(f.order_date) is not null
+group by year(f.order_date) , p.product_name
+) 
+select  order_year  , product_name ,current_sales  , 
+avg(current_sales) over(partition by product_name) as avg_sales  , 
+current_sales - avg(current_sales) over(partition by product_name) as difference_sales ,
+case 
+   when current_sales - avg(current_sales) over(partition by product_name) > 0 then "ABOVE AVERAGE"
+   when current_sales - avg(current_sales) over(partition by product_name) < 0 then "BELOW AVERAGE"
+   else 'AVG'
+   end flag ,
+   lag(current_sales) over(partition by product_name order by order_year) as py_year,
+current_sales - lag(current_sales) over(partition by product_name order by order_year) as diff_py_year ,
+case 
+   when current_sales - lag(current_sales) over(partition by product_name order by order_year) > 0 then "Increasing"
+   when current_sales - lag(current_sales) over(partition by product_name order by order_year ) < 0 then "Decreasing"
+   else 'No change'
+   end flagg
+from vijay
+order by product_name , order_year;
+
+-- PART TO WHOLE ANAYSIS 
+
+-- Which category contribute the most to overall sales ?
+
+
+with category_contribute as (
+select category , sum(sales_amount) as total_sales from dim_products p
+join fact_sales f
+on p.product_key = f.product_key
+group by category
+)
+select category, total_sales ,sum(total_sales) over() as overallsales ,
+concat(round((total_sales/sum(total_sales) over()) * 100 , 2) , "%") as part_to_whole
+from  category_contribute;
+
+
+-- DATA SEGMENTATION
+
+select  * from dim_customers;
+select * from dim_products;
+select * from fact_sales;
+
+
+-- segment products into cost ranges 
+-- and count howmany products fall into each segment
+
+
+with cte as(
+select product_key, product_name , cost , 
+case 
+when cost < 100 then "Below 100"
+when cost between 100 and 500 then "Between 100-500"
+when cost between 500 and 1000 then "between 500-1000"
+else "Above 1000"
+end costrange 
+ from dim_products
+) select costrange, count(product_key) as countt from cte
+group by costrange
+order by costrange desc;
+
+select  * from dim_customers;
+select * from dim_products;
+select * from fact_sales;
+
+
+-- Group customers into three segments based on their spending behavior:
+-- VIP: Customers with at least 12 months of history and spending more than €5,000.
+-- Regular: Customers with at least 12 months of history but spending €5,000 or less.
+-- New: Customers with a lifespan less than 12 months.
+-- And find the total number of customers by each group
+
+
+select flag, count(customer_key) as totalcust from (
+with customer_spending as(
+select c.customer_key , sum(f.sales_amount) as totamount,
+min(order_date) as firstdate ,
+max(order_date) as maxdate,
+timestampdiff(month , min(order_date) , max(order_date)) as lifespan
+from fact_sales f
+Left join dim_customers c
+on c.customer_key = f.customer_key 
+group by  c.customer_key 
+) 
+select customer_key , totamount,lifespan, 
+case 
+    when lifespan >= 12 and totamount > 5000 then "VIP"
+    when lifespan >= 12 and totamount <= 5000 then "regular"
+    else 'New'
+end flag 
+from customer_spending
+) as j
+group by flag;
+
+
+-- BUILD CUSTOMER REPORT
+
+-- Purpose:
+-- This report consolidates key customer metrics and behaviors
+-- Highlights:
+-- 1. Gathers essential fields such as names, ages, and transaction details.
+-- 2. Segments customers into categories (VIP, Regular, New) and age groups.
+-- 3. Aggregates customer-level metrics:
+-- total orders
+-- total sales
+-- total quantity purchased
+-- total products
+-- - lifespan (in months)
+-- 4. Calculates valuable KPIs:
+-- recency (months since last order)
+-- average order value
+-- average monthly spend
+
+
+-- Base query to retrive all neccessary columns 
+create view Customer_report as 
+with base_query as(
+select 
+f.order_number , f.product_key, f.order_date , f.sales_amount, f.quantity,
+c.customer_key,c.customer_number , 
+concat(c.first_name , " ", c.last_name) as customername,
+c.birthdate ,
+timestampdiff(year , birthdate , current_date()) as age from fact_sales f
+left join dim_customers c
+on f.customer_key = c.customer_key
+where order_date is not null
+) ,
+
+-- Summarise key metrics at customerlevel 
+
+customer_aggregation as (
+select customer_key, customer_number , customername ,age ,
+count(distinct order_number) as total_orders,
+count(distinct product_key) as total_products,
+sum(sales_amount) as total_sales, 
+sum(quantity) as total_quantity,
+max(order_date) as last_order,
+timestampdiff(month, min(order_date), max(order_date)) as lifespan 
+from base_query 
+group by 
+ customer_key, customer_number , customername ,age
+) 
+select customer_key, customer_number , customername ,age ,
+case
+   when age < 20 then "Under 20"
+   when age between 20 and 29 then "20-29"
+   when age between 30 and 39 then "30-39"
+   when age between 40 and 49 then "40-49"
+  else "50 and above"
+  end as age_group,
+  case 
+    when lifespan >= 12 and total_sales > 5000 then "VIP"
+    when lifespan >= 12 and total_sales <= 5000 then "regular"
+    else 'New'
+end customer_segment ,
+total_orders,
+total_products,
+total_sales, 
+total_quantity,
+last_order ,
+timestampdiff(month , last_order , current_date()) as recency,
+lifespan,
+-- Average order value
+case 
+
+   when total_orders = 0 then 0
+   else round(( cast(total_sales as signed)/total_orders), 2) 
+ end average_order_value,
+
+-- Average monthly spend
+case 
+    when lifespan = 0 then total_sales 
+    else total_sales / lifespan 
+end avg_monthly_spend 
+from customer_aggregation;
+
+select * from customer_report
